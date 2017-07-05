@@ -13,7 +13,7 @@ import java.io.File
 
 import breeze.numerics._
 import com.google.common.primitives.Doubles
-import is.hail.stats.skat
+import is.hail.stats.SKAT
 import org.scalatest.testng.TestNGSuite
 
 class SkatSuite extends SparkSuite {
@@ -27,6 +27,7 @@ class SkatSuite extends SparkSuite {
       }.toArray
     }
   }
+
   def largeMatrixToString(A: DenseMatrix[Double], seperator: String): String =
   {
     val rows = A.rows
@@ -104,7 +105,7 @@ class SkatSuite extends SparkSuite {
     println("Starting Scala Routines")
     println(header)
 
-    val SKAT = new skat(convert(G, Double), covariates, phenotypes, weights)
+    val SKAT = new SKAT(convert(G, Double), covariates, phenotypes, weights)
     val (skatNullModel,firstTiming1) = time{SKAT.fitCovariates()}
     var t1 = 0.0.toLong
     for (i <- 1 to testsToAverageOver) {
@@ -196,7 +197,7 @@ class SkatSuite extends SparkSuite {
     println(header)
     println("Starting scala routines")
     println(header)
-    val SKAT = new skat(convert(genotypes, Double), covariates,
+    val SKAT = new SKAT(convert(genotypes, Double), covariates,
                         phenotypes, weights)
     val (skatNullModel,firstTiming1) = time{SKAT.fitCovariates()}
     var t1 = 0.0.toLong
