@@ -8,7 +8,7 @@ import com.sun.jna.Native
 import com.sun.jna.ptr.IntByReference
 import is.hail.utils._
 
-/** skat
+/** SKAT
   *   an implementation of the SKAT algorithm.
   * Input:
   *   G          (n x k) DenseMatrix
@@ -30,14 +30,14 @@ import is.hail.utils._
   */
 
 
-class skat(G: DenseMatrix[Double], covs: DenseMatrix[Double],
+class SKAT(G: DenseMatrix[Double], covs: DenseMatrix[Double],
            phenotypes: DenseVector[Double], weights: DenseVector[Double]) {
   //initialize basic counters
   val n = covs.rows
   val m = covs.cols
 
   // Phase 1: Solve least squares problem over the covariates
-  def fitCovariates():skatNullModel = {
+  def fitCovariates():SKATNullModel = {
 
     //expand Covariates to include intercept
     var covariatesWithIntercept = DenseMatrix.ones[Double](n, m + 1)
@@ -50,12 +50,12 @@ class skat(G: DenseMatrix[Double], covs: DenseMatrix[Double],
     val residual = phenotypes - expectedMean
     val sigmaSqrd = (residual dot residual) / (n - (m + 1))
 
-    new skatNullModel(QR.q, G * diag(sqrt(weights)), residual, sigmaSqrd)
+    new SKATNullModel(QR.q, G * diag(sqrt(weights)), residual, sigmaSqrd)
     }
 }
 
 
-/**  skatNullModel
+/**  SKATNullModel
   *    a helper class produced used in the skat class. This class takes in a QR
   *    decomposition and residual from the regression algorithm run over the
   *    covariates and uses this to compute the skatStat (Q value from original
@@ -82,7 +82,7 @@ class skat(G: DenseMatrix[Double], covs: DenseMatrix[Double],
   *         cumulative disitribution of a chi-squared distribution
   *         (Citation below).
   */
-class skatNullModel(Q: DenseMatrix[Double],weightedG: DenseMatrix[Double],
+class SKATNullModel(Q: DenseMatrix[Double],weightedG: DenseMatrix[Double],
                      residual: DenseVector[Double], sigmaSqrd: Double){
 
   /**   Davies Algorithm original C code
