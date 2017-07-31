@@ -4414,7 +4414,7 @@ class VariantDataset(object):
     @typecheck_method(key_name=strlike,
                       variant_keys=strlike,
                       single_key=bool,
-                      weight_expr=strlike,
+                      weight_expr=nullable(strlike),
                       y=strlike,
                       covariates=listof(strlike),
                       use_dosages=bool)
@@ -4496,7 +4496,7 @@ class VariantDataset(object):
         if weight_expr == None:
           weight_expr = "undefined by user"
 
-        return KeyTable(self.hc, self._jvdf.skat(key_name, variant_keys, single_key, weight_expr, y,
+        return KeyTable(self.hc, self._jvdf.skat(key_name, variant_keys, single_key, joption(weight_expr), y,
                                     jarray(Env.jvm().java.lang.String, covariates), use_dosages))
 
     @handle_py4j
