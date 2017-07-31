@@ -4493,8 +4493,6 @@ class VariantDataset(object):
         :return: Key table of SKAT results.
         :rtype: :py:class:`.KeyTable`
         """
-        if weight_expr == None:
-          weight_expr = "undefined by user"
 
         return KeyTable(self.hc, self._jvdf.skat(key_name, variant_keys, single_key, joption(weight_expr), y,
                                     jarray(Env.jvm().java.lang.String, covariates), use_dosages))
