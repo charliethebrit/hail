@@ -5,9 +5,6 @@ import is.hail.methods.SkatStat
 import com.sun.jna.Native
 import com.sun.jna.ptr.IntByReference
 
-import scala.math.pow
-import net.sourceforge.jdistlib.NonCentralChiSquare
-
 /** SkatModel
   *    A class which has all the algorithms for computing the p value of the
   *    Variance-component score statistic thats passed into the class.
@@ -69,6 +66,7 @@ class SkatModel(skatStat: Double) {
       allEvalsSum += allEvals(i)
       i += 1
     }
+
     val threshold = 1e-5 * allEvalsSum / allEvals.length
 
     //Initialize parameters to Davies' algorithm
@@ -85,7 +83,6 @@ class SkatModel(skatStat: Double) {
     val x = qfWrapper(evals, noncentrality, dof, terms, s, skatStat, iterations, accuracy, trace, fault)
 
     SkatStat(skatStat, 1 - x, fault.getValue)
-
   }
 
   /** computeLinearSkatStats
@@ -124,14 +121,13 @@ class SkatModel(skatStat: Double) {
     *   SkatStat (see computePVal)
     */
   def computeLogisticSkatStat(X: DenseMatrix[Double], mu: DenseVector[Double],
-    Gw: DenseMatrix[Double]): Unit = {
-    /**
-      *val V = diag(mu.map((x) => x * (1 - x)))
-      *val weightedX = V * X
-      *val P = V - weightedX * ((X.t * weightedX) \ weightedX.t)
-      *computePVal(Gw.t * P * Gw)
-      */
+    Gw: DenseMatrix[Double]): SkatStat = {
+      val V = diag(mu.map((x) => x * (1 - x)))
+      val weightedX = V * X
+      val P = V - weightedX * ((X.t * weightedX) \ weightedX.t)
+      computePVal(Gw.t * P * Gw)
 
+/**
     val W = diag(mu.map((x) => math.sqrt(x * (1 - x))))
     val WX = W * X
     val WGw = W * Gw
@@ -204,7 +200,7 @@ class SkatModel(skatStat: Double) {
 
     val pval = NonCentralChiSquare.cumulative(QNorm, df, 0, false, false)
     println(pval)
-
+*/
   }
 
 }

@@ -4,9 +4,10 @@ import is.hail.utils._
 import is.hail.variant._
 import is.hail.expr._
 import is.hail.keytable.KeyTable
-import is.hail.stats.{RegressionUtils, SkatModel}
+import is.hail.stats.{LogisticRegressionModel, RegressionUtils, SkatModel}
 import is.hail.annotations.Annotation
 import breeze.linalg._
+import breeze.numerics.sigmoid
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 
@@ -23,6 +24,8 @@ case class SkatStat(q: Double, pval: Double, fault: Int) {
 
 case class SkatTuple[T <: Vector[Double]](q: Double, xw: T, qtxw: DenseVector[Double])
 
+case class LogisticSkatTuple[T <: Vector[Double]](q: Double, xw: T)
+
 object Skat {
 
   def apply(vds: VariantDataset,
@@ -33,10 +36,12 @@ object Skat {
     yExpr: String,
     covExpr: Array[String],
     useDosages: Boolean,
-    useLargeN: Boolean = false): KeyTable = {
+    useLargeN: Boolean = false,
+    useLogistic: Boolean = false): KeyTable = {
 
 
-    def SkatRDDtoKeyTable[T <: Vector[Double]](keyedRdd:  RDD[(Any, Iterable[(T, Double)])], keyType: Type,
+
+    def SkatRDDtoKeyTable[T <: Vector[Double]](keyedRdd: RDD[(Any, Iterable[(T, Double)])], keyType: Type,
       y: DenseVector[Double], cov: DenseMatrix[Double], keyName: String,
       resultOp: (Array[SkatTuple[T]], Double) => SkatStat): KeyTable = {
       val n = y.size
@@ -64,8 +69,8 @@ object Skat {
       }
 
       val skatRDD = keyedRdd
-        .map {case (k, vs) =>
-          val vArray = vs.toArray.map{ case (gs, w) => variantPreProcess(gs, w) }
+        .map { case (k, vs) =>
+          val vArray = vs.toArray.map { case (gs, w) => variantPreProcess(gs, w) }
           val skatStat = if (vArray.length * n < Int.MaxValue) {
             resultOp(vArray, sigmaSq)
           }
@@ -80,26 +85,78 @@ object Skat {
       new KeyTable(vds.hc, skatRDD, skatSignature, key = Array(keyName))
     }
 
+    def SkatRDDtoKeyTableLogistic[T <: Vector[Double]](keyedRdd: RDD[(Any, Iterable[(T, Double)])], keyType: Type,
+      y: DenseVector[Double], cov: DenseMatrix[Double], keyName: String,
+      resultOp: (Array[LogisticSkatTuple[T]], DenseMatrix[Double], DenseVector[Double]) => SkatStat): KeyTable = {
+      val n = y.size
+      val k = cov.cols
+      val d = n - k
+
+      if (d < 1)
+        fatal(s"$n samples and $k ${ plural(k, "covariate") } including intercept implies $d degrees of freedom.")
+
+      val logRegM = new LogisticRegressionModel(cov, y).fit()
+      if (!logRegM.converged)
+        fatal("Failed to fit logistic regression null model (MLE with covariates only): " + (
+          if (logRegM.exploded)
+            s"exploded at Newton iteration ${ logRegM.nIter }"
+          else
+            "Newton iteration failed to converge"))
+
+      val mu = (cov * logRegM.b).map((x) => sigmoid(x))
+      val res = y - mu
+
+      val sc = keyedRdd.sparkContext
+      val muBc = sc.broadcast(mu)
+      val resBc = sc.broadcast(res)
+      val covBc = sc.broadcast(cov)
+
+      def variantPreProcess[T <: Vector[Double]](gs: T, w: Double): LogisticSkatTuple[T] = {
+        val sqrtw =  math.sqrt(w)
+        val wx: T = (gs * w).asInstanceOf[T]
+        val sj = resBc.value dot wx
+        LogisticSkatTuple(sj * sj, wx)
+      }
+
+      val skatRDD = keyedRdd
+        .map { case (k, vs) =>
+          val vArray = vs.toArray.map { case (gs, w) => variantPreProcess(gs, w) }
+          val skatStat = resultOp(vArray, covBc.value, muBc.value)
+          Row(k, skatStat.q, skatStat.pval, skatStat.fault)
+        }
+
+      val (skatSignature, _) = TStruct(keyName -> keyType.asInstanceOf[Type]).merge(SkatStat.schema)
+
+      new KeyTable(vds.hc, skatRDD, skatSignature, key = Array(keyName))
+    }
 
     val dosages = (gs: Iterable[Genotype], n: Int) => RegressionUtils.dosages(gs, (0 until n).toArray)
 
-    (useDosages,useLargeN) match {
-      case (false, false) =>
+    (useDosages, useLargeN, useLogistic) match {
+      case (false, false, false) =>
         val (keyedRdd, keysType, y, cov) =
           keyedRDDSkat(vds, variantKeys, singleKey, weightExpr, yExpr, covExpr, RegressionUtils.hardCalls(_, _))
         SkatRDDtoKeyTable(keyedRdd, keysType, y, cov, keyName, sparseResultOp)
-      case (false, true) =>
+      case (false, true, false) =>
         val (keyedRdd, keysType, y, cov) =
           keyedRDDSkat(vds, variantKeys, singleKey, weightExpr, yExpr, covExpr, RegressionUtils.hardCalls(_, _))
         SkatRDDtoKeyTable(keyedRdd, keysType, y, cov, keyName, largeNResultOp[SparseVector[Double]])
-      case (true, false) =>
+      case (true, false, false) =>
         val (keyedRdd, keysType, y, cov) =
           keyedRDDSkat(vds, variantKeys, singleKey, weightExpr, yExpr, covExpr, dosages)
         SkatRDDtoKeyTable(keyedRdd, keysType, y, cov, keyName, denseResultOp)
-      case (true, true) =>
+      case (true, true, false) =>
         val (keyedRdd, keysType, y, cov) =
           keyedRDDSkat(vds, variantKeys, singleKey, weightExpr, yExpr, covExpr, dosages)
         SkatRDDtoKeyTable(keyedRdd, keysType, y, cov, keyName, largeNResultOp[DenseVector[Double]])
+      case (false, _, true) =>
+        val (keyedRdd, keysType, y, cov) =
+          keyedRDDSkat(vds, variantKeys, singleKey, weightExpr, yExpr, covExpr, RegressionUtils.hardCalls(_, _))
+        SkatRDDtoKeyTableLogistic(keyedRdd, keysType, y, cov, keyName, logisticSparseResultOp)
+      case (true, _, true) =>
+        val (keyedRdd, keysType, y, cov) =
+          keyedRDDSkat(vds, variantKeys, singleKey, weightExpr, yExpr, covExpr, dosages)
+        SkatRDDtoKeyTableLogistic(keyedRdd, keysType, y, cov, keyName, logisticDenseResultOp)
     }
 
   }
@@ -260,9 +317,82 @@ object Skat {
     SPG.computeLinearSkatStats(weightedGenotypesGrammian, qtWeightedGenotypesGrammian)
   }
 
+  def logisticDenseResultOp(st: Array[LogisticSkatTuple[DenseVector[Double]]],
+    cov: DenseMatrix[Double], mu: DenseVector[Double]): SkatStat = {
+
+    val m = st.length
+    val n = st(0).xw.size
+
+    var xwArray = new Array[Double](m * n)
+    var j = 0;
+    var i = 0
+
+    //copy in non-zeros to weighted genotype matrix array
+    i = 0
+    while (i < m) {
+      j = 0
+      val xwsi = st(i).xw
+      while (j < n) {
+        xwArray(i * n + j) = xwsi(j)
+        j += 1
+      }
+      i += 1
+    }
+
+    //compute the variance component score
+    var skatStat = 0.0
+    i = 0
+    while (i < m) {
+      skatStat += st(i).q
+      i += 1
+    }
+
+    val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
+
+    val SPG = new SkatModel(skatStat)
+    SPG.computeLogisticSkatStat(cov, mu, weightedGenotypes)
+  }
+
+  def logisticSparseResultOp(st: Array[LogisticSkatTuple[SparseVector[Double]]],
+    cov: DenseMatrix[Double], mu: DenseVector[Double]): SkatStat = {
+
+    val m = st.length
+    val n = st(0).xw.size
+
+    val xwArray = new Array[Double](m * n)
+
+    var j = 0;
+    var i = 0
+
+    while (i < m) {
+      val nnz = st(i).xw.used
+      val xwsi = st(i).xw
+      j = 0
+      while (j < nnz) {
+        val index = st(i).xw.index(j)
+        xwArray(i * n + index) = xwsi.data(j)
+        j += 1
+      }
+      i += 1
+    }
+
+    //compute the variance component score
+    var skatStat = 0.0
+    i = 0
+    while (i < m) {
+      skatStat += st(i).q
+      i += 1
+    }
+
+    val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
+
+    val SPG = new SkatModel(skatStat)
+    SPG.computeLogisticSkatStat(cov, mu, weightedGenotypes)
+  }
+
   def keyedRDDSkat[T <: Vector[Double]](vds: VariantDataset,
     variantKeys: String,
-    singleKey: Boolean,
+    singleKey: Boolean,var
     weightExpr: Option[String],
     yExpr: String,
     covExpr: Array[String],
@@ -312,7 +442,11 @@ object Skat {
         case _ =>
           Iterator.empty
       }
-    }.groupByKey(),keysType, y, cov)
+    }.groupByKey(), keysType, y, cov)
 
   }
+
+
+
+
 }

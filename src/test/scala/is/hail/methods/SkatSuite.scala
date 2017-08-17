@@ -8,14 +8,14 @@ import is.hail.expr._
 import is.hail.SparkSuite
 import is.hail.io.annotators.IntervalList
 import is.hail.variant.{Genotype, VariantDataset}
-import is.hail.methods.Skat
 
+import util.Random.shuffle
 import scala.sys.process._
 import breeze.linalg._
-import is.hail.keytable.KeyTable
 
 import scala.language.postfixOps
 import is.hail.methods.Skat.keyedRDDSkat
+import is.hail.stats.RegressionUtils.getSampleAnnotation
 import is.hail.stats.RegressionUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
@@ -24,6 +24,154 @@ import org.testng.annotations.Test
 case class SkatAggForR[T <: Vector[Double]](xs: ArrayBuilder[T], weights: ArrayBuilder[Double])
 
 class SkatSuite extends SparkSuite {
+
+  def noiseTest() = {
+    val noiseTests = 10
+    val averageOver = 1
+    val noiseIncrement =   .5
+    val useDosages = false
+    val useLargeN = false
+    val useLogistic = true
+
+    val fileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/alternatingDemo.vds"
+    val saveFileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/pValResults/BDNoiseTests4.txt"
+    val pvals = Array.fill[Double](noiseTests)(0.0)
+    val pvalsR = Array.fill[Double](noiseTests)(0.0)
+    var pvalAve = 0.0
+    var pvalRAve = 0.0
+
+
+    var vds = hc.readVDS(fileLocation).annotateVariantsExpr("va.weight = global.weight[v]**2")
+
+    //normalize data
+
+    val symTab = Map(
+      "s" -> (0, TString),
+      "sa" -> (1, vds.saSignature))
+    val ec = EvalContext(symTab)
+    val yIS = getSampleAnnotation(vds, "sa.pheno", ec).map(_.get)
+    val yMean = sum(yIS)/yIS.length
+    val yStd = math.sqrt(sum(yIS.map((x) => math.pow((x - yMean),2))) / yIS.length)
+
+    vds = vds.annotateGlobalExpr(f"global.mean = $yMean")
+             .annotateGlobalExpr(f"global.std = $yStd ")
+             .annotateSamplesExpr("sa.pheno = (sa.pheno - global.mean)/global.std")
+
+    var i = 0
+    var j = 0
+    while (i < noiseTests){
+
+      while(j < averageOver) {
+        val expr = f"sa.pheno = pcoin((1/(1 + exp(-(sa.pheno + $i%f * $noiseIncrement%f * rnorm(0,1))))))"
+        //val expr = f"sa.pheno = sa.pheno + $i%f * $noiseIncrement%f * rnorm(0,1)"
+        vds = vds.annotateSamples(vds.sampleIds.zip(yIS).toMap, TFloat64, "sa.pheno")
+                 .annotateSamplesExpr(expr)
+
+        val row = Skat(vds,"gene", "\'bestgeneever\'", singleKey = true, Some("va.weight"), "sa.pheno",
+                       Array("sa.cov1", "sa.cov2"), useDosages, useLargeN, useLogistic).rdd.collect()
+        val resultsArray = testInR(vds, "gene", "\'bestgeneever\'", singleKey = true,
+          Some("va.weight"), "sa.pheno", Array("sa.cov1", "sa.cov2"), useDosages, useLogistic)
+
+        pvalAve += row(0)(2).asInstanceOf[Double]
+        pvalRAve += resultsArray(0)(2).asInstanceOf[Double]
+
+        j += 1
+      }
+      pvals(i) = pvalAve/averageOver
+      pvalsR(i) = pvalRAve/averageOver
+      println((pvals(i), pvalsR(i)))
+      i += 1
+      j = 0
+
+      pvalAve = 0
+      pvalRAve = 0
+
+    }
+/**
+    val pvalMatrix = new DenseMatrix(noiseTests,1,pvals)
+    val pvalRMatrix = new DenseMatrix(noiseTests,1,pvalsR)
+    val sendToPython = DenseMatrix.horzcat(pvalMatrix,pvalRMatrix)
+
+    hadoopConf.writeTextFile(saveFileLocation) {
+      _.write(largeMatrixToString(sendToPython,","))
+    }
+*/
+    println("blah")
+  }
+
+
+  def permutationTest() = {
+    val permutationTests = 100
+    val pvalFileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/pvalResults/constantPvals.txt"
+    val fileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/constantDemo.vds"
+    val pythonFileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/comparePvals.py"
+    val pvals = Array.fill[Double](permutationTests + 1)(0.0)
+    val pvalsR = Array.fill[Double](permutationTests + 1)(0.0)
+    val useDosages = false
+    val useLargeN = false
+    val useLogistic = true
+
+    var i = 0
+
+    var vds = hc.readVDS(fileLocation).annotateVariantsExpr("va.weight = global.weight[v]**2")
+                .annotateSamplesExpr("sa.pheno = pcoin((1/(1 + exp(-sa.pheno + 50))))")
+
+    val symTab = Map(
+      "s" -> (0, TString),
+      "sa" -> (1, vds.saSignature))
+    val ec = EvalContext(symTab)
+    val yIS = getSampleAnnotation(vds, "sa.pheno", ec).map(_.get)
+
+    var row = Skat(vds,"gene", "\'bestgeneever\'", singleKey = true, Some("va.weight"), "sa.pheno",
+                    Array("sa.cov1", "sa.cov2"), useDosages, useLargeN, useLogistic).rdd.collect()
+    pvals(0) = row(0)(2).asInstanceOf[Double]
+    var resultsArray = testInR(vds, "gene", "\'bestgeneever\'", singleKey = true,
+      Some("va.weight"), "sa.pheno", Array("sa.cov1", "sa.cov2"), useDosages, useLogistic)
+    pvalsR(0) = resultsArray(0)(2).asInstanceOf[Double]
+
+    println(row(0)(2).asInstanceOf[Double],resultsArray(0)(2).asInstanceOf[Double])
+    println((pvals(0), pvalsR(0)))
+
+    while(i < permutationTests){
+      vds = vds.annotateSamples(vds.sampleIds.zip(shuffle(yIS)).toMap, TFloat64, "sa.pheno")
+      row = Skat(vds,"gene", "\'bestgeneever\'", singleKey = true, Some("va.weight"), "sa.pheno",
+                 Array("sa.cov1", "sa.cov2"), false, true).rdd.collect()
+      pvals(i+1) = row(0)(2).asInstanceOf[Double]
+
+      resultsArray = testInR(vds, "gene", "\'bestgeneever\'", singleKey = true,
+        Some("va.weight"), "sa.pheno", Array("sa.cov1", "sa.cov2"), false, true)
+      pvalsR(i+1) = resultsArray(0)(2).asInstanceOf[Double]
+
+      i += 1
+
+    }
+    val pvalMatrix = new DenseMatrix(permutationTests + 1, 1, pvals)
+    val pvalRMatrix = new DenseMatrix(permutationTests + 1, 1, pvalsR)
+    val sendToPython = DenseMatrix.horzcat(pvalMatrix, pvalRMatrix)
+
+
+    hadoopConf.writeTextFile(pvalFileLocation) {
+      _.write(largeMatrixToString(sendToPython, ","))
+    }
+
+    val pyScript = "Python " + pythonFileLocation + s" ${ pvalFileLocation }"
+    pyScript !
+
+    println("blah blah")
+  }
+
+  def plotPvals(pvals: DenseMatrix[Double]) = {
+
+    val inputFile= tmpDir.createLocalTempFile("pValMatrix", ".txt")
+    hadoopConf.writeTextFile(inputFile) {
+      _.write(largeMatrixToString(pvals,","))
+    }
+
+    val pyScript = s"Python " +
+      s"${ inputFile }"
+    pyScript !
+
+  }
 
   //Routines for running programs in R for comparison
 
@@ -41,7 +189,10 @@ class SkatSuite extends SparkSuite {
     var string: String = ""
     for (i <- 0 until A.rows) {
       for (j <- 0 until A.cols) {
-        string = string + separator + A(i, j).toString()
+        if (j == A.cols - 1)
+          string = string + A(i, j).toString()
+        else
+          string = string + A(i, j).toString() + separator
       }
       string = string + "\n"
     }
@@ -101,7 +252,8 @@ class SkatSuite extends SparkSuite {
     weightExpr: Option[String],
     yExpr: String,
     covExpr: Array[String],
-    useDosages: Boolean): Array[Row] = {
+    useDosages: Boolean,
+    useLogistic: Boolean = false): Array[Row] = {
 
 
     def skatTestInR[T <: Vector[Double]](keyedRdd:  RDD[(Any, Iterable[(T, Double)])], keyType: Type,
@@ -148,10 +300,12 @@ class SkatSuite extends SparkSuite {
 
           val resultsFile = tmpDir.createLocalTempFile("results", ".txt")
 
+          val datatype = if (useLogistic) "D" else "C"
+
           val rScript = s"Rscript src/test/resources/skatTest.R " +
             s"${ uriPath(inputFileG) } ${ uriPath(inputFileCov) } " +
             s"${ uriPath(inputFilePheno) } ${ uriPath(inputFileW) } " +
-            s"${ uriPath(resultsFile) } " + "C"
+            s"${ uriPath(resultsFile) } " + datatype
 
           rScript !
           val results = readResults(resultsFile)
@@ -182,13 +336,16 @@ class SkatSuite extends SparkSuite {
     "test/resources/regressionLinear.pheno",
     types = Map("Pheno" -> TFloat64), missing = "0").keyBy("Sample")
 
+  def phenotypesD = hc.importTable("src/" +
+    "test/resources/skat.phenoD",
+    types = Map("Pheno" -> TFloat64)).keyBy("Sample")
+
   def intervals = IntervalList.read(hc, "src/test/resources/regressionLinear.interval_list")
 
   def vds: VariantDataset = hc.importVCF("src/test/resources/regressionLinear.vcf")
     .annotateVariantsTable(intervals, root = "va.genes", product = true)
     .annotateSamplesTable(phenotypes, root = "sa.pheno")
     .annotateSamplesTable(covariates, root = "sa.cov")
-    //  .annotateVariantsExpr("va.weight = v.start.toDouble")
     .annotateSamplesExpr("sa.pheno = if (sa.pheno == 1.0) false else if (sa.pheno == 2.0) true else NA: Boolean")
     .filterSamplesExpr("sa.pheno.isDefined() && sa.cov.Cov1.isDefined() && sa.cov.Cov2.isDefined()")
     .annotateVariantsExpr("va.AF = gs.callStats(g=> v).AF")
@@ -258,7 +415,6 @@ class SkatSuite extends SparkSuite {
     }
 
   }
-
 
   @Test def largeNSmallTest() {
 
@@ -446,6 +602,7 @@ class SkatSuite extends SparkSuite {
   @Test def largeNBigTest() {
     val useDosages = true
     val useLargeN = true
+    val useLogistic = false
 
     val covariates = new Array[String](2)
     for (i <- 1 to 2) {
@@ -455,10 +612,10 @@ class SkatSuite extends SparkSuite {
     val dosages = (gs: Iterable[Genotype], n: Int) => RegressionUtils.dosages(gs, (0 until n).toArray)
 
     val kt = Skat(vdsSkat.splitMulti(), "gene", "va.genes", false, Option("va.weight"), "sa.pheno0",
-              Array("sa.cov.Cov1", "sa.cov.Cov2"),useDosages,useLargeN)
+              Array("sa.cov.Cov1", "sa.cov.Cov2"),useDosages,useLargeN, useLogistic)
 
     val resultsArray = testInR(vdsSkat.splitMulti(), "gene", "va.genes", singleKey = false,
-      Some("va.weight"), "sa.pheno0", covariates, useDosages)
+      Some("va.weight"), "sa.pheno0", covariates, useDosages, useLogistic)
 
     val rows = kt.rdd.collect()
 
@@ -479,6 +636,56 @@ class SkatSuite extends SparkSuite {
       i += 1
     }
   }
+
+  def vdsLogistic: VariantDataset = hc.importVCF("src/test/resources/sample2.vcf")
+    .annotateVariantsTable(intervalsSkat, root = "va.genes", product = true)
+    .annotateSamplesTable(phenotypesD, root = "sa.pheno")
+    .annotateSamplesTable(covariatesSkat, root = "sa.cov")
+ //   .annotateSamplesExpr("sa.pheno = if (sa.pheno == 1.0) false else if (sa.pheno == 2.0) true else NA: Boolean")
+   // .filterSamplesExpr("sa.pheno.isDefined() && sa.cov.Cov1.isDefined() && sa.cov.Cov2.isDefined()")
+    .annotateVariantsExpr("va.AF = gs.callStats(g=> v).AF")
+    .annotateVariantsExpr("va.weight = let af = if (va.AF[0] <= va.AF[1]) va.AF[0] else va.AF[1] in dbeta(af,1.0,25.0)**2")
+    .splitMulti()
+
+  def dosagesBigTestLogistic() {
+
+    val useDosages = true
+    val useLargeN = false
+    val useLogistic = true
+
+    val resultsArray = testInR(vdsLogistic, "gene", "va.genes", singleKey = false,
+      Some("va.weight"), "sa.pheno", Array("sa.cov.Cov1", "sa.cov.Cov2"), useDosages, useLogistic)
+
+    val kt = Skat(vdsLogistic, "gene", "va.genes", singleKey = false, Option("va.weight"),
+      "sa.pheno", Array("sa.cov.Cov1", "sa.cov.Cov2"), useDosages, useLargeN, useLogistic)
+
+    val rows = kt.rdd.collect()
+
+    val tol = 1e-5
+    var i = 0
+
+    while (i < resultsArray.size) {
+      val qstat = rows(i).get(1).asInstanceOf[Double]
+      val pval = rows(i).get(2).asInstanceOf[Double]
+
+      val qstatR = resultsArray(i)(1).asInstanceOf[Double]
+      val pvalR = resultsArray(i)(2).asInstanceOf[Double]
+
+      println(qstat, qstatR)
+      println(pval, pvalR)
+      println(rows(i).get(3))
+
+      /**
+      if (pval <= 1 && pval >= 0) {
+        assert(D_==(qstat, qstatR, tol))
+        assert(D_==(pval, pvalR, tol))
+      }
+        **/
+      i += 1
+    }
+
+  }
+
 }
 
 
