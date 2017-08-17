@@ -392,7 +392,7 @@ object Skat {
 
   def keyedRDDSkat[T <: Vector[Double]](vds: VariantDataset,
     variantKeys: String,
-    singleKey: Boolean,var
+    singleKey: Boolean,
     weightExpr: Option[String],
     yExpr: String,
     covExpr: Array[String],
