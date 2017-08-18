@@ -41,7 +41,7 @@ object Skat {
 
     def SkatRDDtoKeyTable[T <: Vector[Double]](keyedRdd: RDD[(Any, Iterable[(T, Double)])], keyType: Type,
       y: DenseVector[Double], cov: DenseMatrix[Double], keyName: String,
-      resultOp: (Array[SkatTuple[T]], Double) => SkatStat): KeyTable = {
+      resultOp: (Array[SkatTuple[T]], Double) => (SkatStat, Array[Long])): KeyTable = {
       val n = y.size
       val k = cov.cols
       val d = n - k
@@ -69,23 +69,29 @@ object Skat {
       val skatRDD = keyedRdd
         .map { case (k, vs) =>
           val vArray = vs.toArray.map { case (gs, w) => variantPreProcess(gs, w) }
-          val skatStat = if (vArray.length * n < Int.MaxValue) {
+          val (skatStat, timings) = if (vArray.length * n < Int.MaxValue) {
             resultOp(vArray, sigmaSq)
           }
           else {
             largeNResultOp(vArray, sigmaSq)
           }
-          Row(k, skatStat.q, skatStat.pval, skatStat.fault)
+          Row(k, skatStat.q, skatStat.pval, skatStat.fault, timings.map(formatTime))
         }
 
-      val (skatSignature, _) = TStruct(keyName -> keyType.asInstanceOf[Type]).merge(SkatStat.schema)
+      val schema = TStruct(
+        ("q", TFloat64),
+        ("pval", TFloat64),
+        ("fault", TInt32),
+        ("timings", TArray(TString)))
+
+      val (skatSignature, _) = TStruct(keyName -> keyType.asInstanceOf[Type]).merge(schema)
 
       new KeyTable(vds.hc, skatRDD, skatSignature, key = Array(keyName))
     }
 
     def SkatRDDtoKeyTableLogistic[T <: Vector[Double]](keyedRdd: RDD[(Any, Iterable[(T, Double)])], keyType: Type,
       y: DenseVector[Double], cov: DenseMatrix[Double], keyName: String,
-      resultOp: (Array[LogisticSkatTuple[T]], DenseMatrix[Double], DenseVector[Double]) => SkatStat): KeyTable = {
+      resultOp: (Array[LogisticSkatTuple[T]], DenseMatrix[Double], DenseVector[Double]) => (SkatStat, Array[Long])): KeyTable = {
       val n = y.size
       val k = cov.cols
       val d = n - k
@@ -119,11 +125,17 @@ object Skat {
       val skatRDD = keyedRdd
         .map { case (k, vs) =>
           val vArray = vs.toArray.map { case (gs, w) => variantPreProcess(gs, w) }
-          val skatStat = resultOp(vArray, covBc.value, muBc.value)
-          Row(k, skatStat.q, skatStat.pval, skatStat.fault)
+          val (skatStat, timings) = resultOp(vArray, covBc.value, muBc.value)
+          Row(k, skatStat.q, skatStat.pval, skatStat.fault, timings)
         }
 
-      val (skatSignature, _) = TStruct(keyName -> keyType.asInstanceOf[Type]).merge(SkatStat.schema)
+      val schema = TStruct(
+        ("q", TFloat64),
+        ("pval", TFloat64),
+        ("fault", TInt32),
+        ("timings", TArray(TString)))
+
+      val (skatSignature, _) = TStruct(keyName -> keyType.asInstanceOf[Type]).merge(schema)
 
       new KeyTable(vds.hc, skatRDD, skatSignature, key = Array(keyName))
     }
@@ -159,59 +171,69 @@ object Skat {
 
   }
 
-  def denseResultOp(st: Array[SkatTuple[DenseVector[Double]]], sigmaSq: Double): SkatStat = {
+  def denseResultOp(st: Array[SkatTuple[DenseVector[Double]]], sigmaSq: Double): (SkatStat, Array[Long]) = {
 
     val m = st.length
     val n = st(0).xw.size
     val k = st(0).qtxw.size
 
-    var xwArray = new Array[Double](m * n)
-    var qtxwArray = new Array[Double](m * k)
-    var j = 0;
+    var j = 0
     var i = 0
-
-    //copy in non-zeros to weighted genotype matrix array
-    i = 0
-    while (i < m) {
-      j = 0
-      val xwsi = st(i).xw
-      while (j < n) {
-        xwArray(i * n + j) = xwsi(j)
-        j += 1
-      }
-      i += 1
-    }
-
-    //add in non-zeros to QtGW array
-    i = 0
-    while (i < m) {
-      j = 0
-      val qtxwsi = st(i).qtxw
-      while (j < k) {
-        qtxwArray(i * k + j) = qtxwsi.data(j)
-        j += 1
-      }
-      i += 1
-    }
-
-    //compute the variance component score
     var skatStat = 0.0
-    i = 0
-    while (i < m) {
-      skatStat += st(i).q
-      i += 1
+
+    val (matrices, matrixCopyTiming) = time {
+
+      var xwArray = new Array[Double](m * n)
+      var qtxwArray = new Array[Double](m * k)
+
+      //copy in non-zeros to weighted genotype matrix array
+      i = 0
+      while (i < m) {
+        j = 0
+        val xwsi = st(i).xw
+        while (j < n) {
+          xwArray(i * n + j) = xwsi(j)
+          j += 1
+        }
+        i += 1
+      }
+
+      //add in non-zeros to QtGW array
+      i = 0
+      while (i < m) {
+        j = 0
+        val qtxwsi = st(i).qtxw
+        while (j < k) {
+          qtxwArray(i * k + j) = qtxwsi.data(j)
+          j += 1
+        }
+        i += 1
+      }
+
+      //compute the variance component score
+      i = 0
+      while (i < m) {
+        skatStat += st(i).q
+        i += 1
+      }
+
+      val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
+      val qtWeightedGenotypes = new DenseMatrix[Double](k, m, qtxwArray)
+
+      (weightedGenotypes.t * weightedGenotypes, qtWeightedGenotypes.t * qtWeightedGenotypes)
     }
 
-    val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
-    val qtWeightedGenotypes = new DenseMatrix[Double](k, m, qtxwArray)
-    val GwGrammian = weightedGenotypes.t * weightedGenotypes
-    val QtGwGrammian = qtWeightedGenotypes.t * qtWeightedGenotypes
+
+    val GwGrammian = matrices._1
+    val QtGwGrammian = matrices._2
 
     val SPG = new SkatModel(skatStat / (2 * sigmaSq))
-    SPG.computeLinearSkatStats(GwGrammian, QtGwGrammian)
+    val (result, timings) = SPG.computeLinearSkatStats(GwGrammian, QtGwGrammian)
+    timings(3) = matrixCopyTiming
+    (result, timings)
   }
 
-  def sparseResultOp(st: Array[SkatTuple[SparseVector[Double]]], sigmaSq: Double): SkatStat = {
+  def sparseResultOp(st: Array[SkatTuple[SparseVector[Double]]], sigmaSq: Double): (SkatStat, Array[Long]) = {
 
     val m = st.length
     val n = st(0).xw.size
@@ -222,49 +244,57 @@ object Skat {
 
     var j = 0;
     var i = 0
-
-    while (i < m) {
-      val nnz = st(i).xw.used
-      val xwsi = st(i).xw
-      j = 0
-      while (j < nnz) {
-        val index = st(i).xw.index(j)
-        xwArray(i * n + index) = xwsi.data(j)
-        j += 1
-      }
-      i += 1
-    }
-
-    //add in non-zeros to QtGW array
-    i = 0
-    while (i < m) {
-      j = 0
-      val qtxwsi = st(i).qtxw
-      while (j < k) {
-        qtxwArray(i * k + j) = qtxwsi.data(j)
-        j += 1
-      }
-      i += 1
-    }
-
-    //compute the variance component score
     var skatStat = 0.0
-    i = 0
-    while (i < m) {
-      skatStat += st(i).q
-      i += 1
-    }
 
-    val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
-    val qtWeightedGenotypes = new DenseMatrix[Double](k, m, qtxwArray)
-    val GwGrammian = weightedGenotypes.t * weightedGenotypes
-    val QtGwGrammian = qtWeightedGenotypes.t * qtWeightedGenotypes
+    val (matrices, matrixCopyTiming) = time {
+
+
+      while (i < m) {
+        val nnz = st(i).xw.used
+        val xwsi = st(i).xw
+        j = 0
+        while (j < nnz) {
+          val index = st(i).xw.index(j)
+          xwArray(i * n + index) = xwsi.data(j)
+          j += 1
+        }
+        i += 1
+      }
+
+      //add in non-zeros to QtGW array
+      i = 0
+      while (i < m) {
+        j = 0
+        val qtxwsi = st(i).qtxw
+        while (j < k) {
+          qtxwArray(i * k + j) = qtxwsi.data(j)
+          j += 1
+        }
+        i += 1
+      }
+
+      //compute the variance component score
+      i = 0
+      while (i < m) {
+        skatStat += st(i).q
+        i += 1
+      }
+
+      val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
+      val qtWeightedGenotypes = new DenseMatrix[Double](k, m, qtxwArray)
+
+      (weightedGenotypes.t * weightedGenotypes, qtWeightedGenotypes.t * qtWeightedGenotypes)
+    }
+    val GwGrammian = matrices._1
+    val QtGwGrammian = matrices._2
 
     val SPG = new SkatModel(skatStat / (2 * sigmaSq))
-    SPG.computeLinearSkatStats(GwGrammian, QtGwGrammian)
+    val (result, timings) = SPG.computeLinearSkatStats(GwGrammian, QtGwGrammian)
+    timings(3) = matrixCopyTiming
+    (result, timings)
   }
 
-  def largeNResultOp[T <: Vector[Double]](st: Array[SkatTuple[T]], sigmaSq: Double): SkatStat = {
+  def largeNResultOp[T <: Vector[Double]](st: Array[SkatTuple[T]], sigmaSq: Double): (SkatStat, Array[Long]) = {
     val m = st.length
     val n = st(0).xw.size
     val k = st(0).qtxw.size
@@ -274,118 +304,132 @@ object Skat {
 
     var i = 0
     var j = 0
-
-    while (i < m) {
-      ZGrammianArray(i * m + i) = st(i).xw dot st(i).xw
-      j = 0
-      while (j < i) {
-        val ijdotprod = st(i).xw dot st(j).xw
-        ZGrammianArray(i * m + j) = ijdotprod
-        ZGrammianArray(j * m + i) = ijdotprod
-        j += 1
-      }
-      i += 1
-    }
-
-    i = 0
-    while (i < m) {
-      QtZGrammianArray(i * m + i) = st(i).qtxw dot st(i).qtxw
-      j = 0
-      while (j < i) {
-        val ijdotprod = st(i).qtxw dot st(j).qtxw
-        QtZGrammianArray(i * m + j) = ijdotprod
-        QtZGrammianArray(j * m + i) = ijdotprod
-        j += 1
-      }
-      i += 1
-    }
-
-    //compute the variance component score
     var skatStat = 0.0
-    i = 0
-    while (i < m) {
-      skatStat += st(i).q
-      i += 1
-    }
+    val (matrices, matrixCopyTiming) = time {
 
-    val weightedGenotypesGrammian = new DenseMatrix[Double](m, m, ZGrammianArray)
-    val qtWeightedGenotypesGrammian = new DenseMatrix[Double](m, m, QtZGrammianArray)
+      while (i < m) {
+        ZGrammianArray(i * m + i) = st(i).xw dot st(i).xw
+        j = 0
+        while (j < i) {
+          val ijdotprod = st(i).xw dot st(j).xw
+          ZGrammianArray(i * m + j) = ijdotprod
+          ZGrammianArray(j * m + i) = ijdotprod
+          j += 1
+        }
+        i += 1
+      }
+
+      i = 0
+      while (i < m) {
+        QtZGrammianArray(i * m + i) = st(i).qtxw dot st(i).qtxw
+        j = 0
+        while (j < i) {
+          val ijdotprod = st(i).qtxw dot st(j).qtxw
+          QtZGrammianArray(i * m + j) = ijdotprod
+          QtZGrammianArray(j * m + i) = ijdotprod
+          j += 1
+        }
+        i += 1
+      }
+
+      //compute the variance component score
+      i = 0
+      while (i < m) {
+        skatStat += st(i).q
+        i += 1
+      }
+
+    (new DenseMatrix[Double](m, m, ZGrammianArray), new DenseMatrix[Double](m, m, QtZGrammianArray))
+  }
+
+    val GwGrammian = matrices._1
+    val QtGwGrammian = matrices._2
 
     val SPG = new SkatModel(skatStat / (2 * sigmaSq))
-    SPG.computeLinearSkatStats(weightedGenotypesGrammian, qtWeightedGenotypesGrammian)
+    val (result, timings) = SPG.computeLinearSkatStats(GwGrammian, QtGwGrammian)
+    timings(3) = matrixCopyTiming
+    (result, timings)
   }
 
   def logisticDenseResultOp(st: Array[LogisticSkatTuple[DenseVector[Double]]],
-    cov: DenseMatrix[Double], mu: DenseVector[Double]): SkatStat = {
+    cov: DenseMatrix[Double], mu: DenseVector[Double]): (SkatStat, Array[Long])= {
 
     val m = st.length
     val n = st(0).xw.size
 
     var xwArray = new Array[Double](m * n)
-    var j = 0;
+    var j = 0
     var i = 0
-
-    //copy in non-zeros to weighted genotype matrix array
-    i = 0
-    while (i < m) {
-      j = 0
-      val xwsi = st(i).xw
-      while (j < n) {
-        xwArray(i * n + j) = xwsi(j)
-        j += 1
-      }
-      i += 1
-    }
-
-    //compute the variance component score
     var skatStat = 0.0
-    i = 0
-    while (i < m) {
-      skatStat += st(i).q
-      i += 1
+
+    val (weightedGenotypes, matrixCopyTiming) = time {
+      //copy in non-zeros to weighted genotype matrix array
+      i = 0
+      while (i < m) {
+        j = 0
+        val xwsi = st(i).xw
+        while (j < n) {
+          xwArray(i * n + j) = xwsi(j)
+          j += 1
+        }
+        i += 1
+      }
+
+      //compute the variance component score
+      i = 0
+      while (i < m) {
+        skatStat += st(i).q
+        i += 1
+      }
+
+      new DenseMatrix[Double](n, m, xwArray)
     }
-
-    val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
-
     val SPG = new SkatModel(skatStat)
-    SPG.computeLogisticSkatStat(cov, mu, weightedGenotypes)
+    val (result, timings) = SPG.computeLogisticSkatStat(cov, mu, weightedGenotypes)
+
+    timings(3) = matrixCopyTiming
+    (result, timings)
   }
 
   def logisticSparseResultOp(st: Array[LogisticSkatTuple[SparseVector[Double]]],
-    cov: DenseMatrix[Double], mu: DenseVector[Double]): SkatStat = {
+    cov: DenseMatrix[Double], mu: DenseVector[Double]): (SkatStat, Array[Long]) = {
 
     val m = st.length
     val n = st(0).xw.size
 
     val xwArray = new Array[Double](m * n)
 
-    var j = 0;
+    var j = 0
     var i = 0
-
-    while (i < m) {
-      val nnz = st(i).xw.used
-      val xwsi = st(i).xw
-      j = 0
-      while (j < nnz) {
-        val index = st(i).xw.index(j)
-        xwArray(i * n + index) = xwsi.data(j)
-        j += 1
-      }
-      i += 1
-    }
-
-    //compute the variance component score
     var skatStat = 0.0
-    i = 0
-    while (i < m) {
-      skatStat += st(i).q
-      i += 1
+
+    val (weightedGenotypes, matrixCopyTiming) = time {
+      while (i < m) {
+        val nnz = st(i).xw.used
+        val xwsi = st(i).xw
+        j = 0
+        while (j < nnz) {
+          val index = st(i).xw.index(j)
+          xwArray(i * n + index) = xwsi.data(j)
+          j += 1
+        }
+        i += 1
+      }
+
+      //compute the variance component score
+      i = 0
+      while (i < m) {
+        skatStat += st(i).q
+        i += 1
+      }
+
+      new DenseMatrix[Double](n, m, xwArray)
     }
-
-    val weightedGenotypes = new DenseMatrix[Double](n, m, xwArray)
-
     val SPG = new SkatModel(skatStat)
-    SPG.computeLogisticSkatStat(cov, mu, weightedGenotypes)
+    val (result, timings) = SPG.computeLogisticSkatStat(cov, mu, weightedGenotypes)
+
+    timings(3) = matrixCopyTiming
+    (result, timings)
   }
 
   def keyedRDDSkat[T <: Vector[Double]](vds: VariantDataset,

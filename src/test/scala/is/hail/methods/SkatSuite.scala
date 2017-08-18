@@ -88,7 +88,7 @@ class SkatSuite extends SparkSuite {
     }
   }
 
- def permutationTest() = {
+  def permutationTest() = {
     val permutationTests = 100
     val pvalFileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/pvalResults/constantPvals.txt"
     val fileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/constantDemo.vds"

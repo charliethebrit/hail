@@ -2,8 +2,10 @@ package is.hail.stats
 
 import breeze.linalg._
 import is.hail.methods.SkatStat
+import is.hail.utils.time
 import com.sun.jna.Native
 import com.sun.jna.ptr.IntByReference
+
 
 /** SkatModel
   *    A class which has all the algorithms for computing the p value of the
@@ -56,8 +58,9 @@ class SkatModel(skatStat: Double) {
     *     of the SkatStat class. With the statistics a integer indicating any issues
     *     running Davies Algorithm is also returned.
     */
-  def computePVal(Grammian: DenseMatrix[Double]): SkatStat = {
-    val allEvals = eigSymD.justEigenvalues(Grammian).toArray
+  def computePVal(Grammian: DenseMatrix[Double]): (SkatStat, Array[Long]) = {
+
+    val (allEvals, eigTiming) =  time { eigSymD.justEigenvalues(Grammian).toArray}
 
     //compute threshold for eigenvalues
     var allEvalsSum = 0.0
@@ -80,9 +83,12 @@ class SkatModel(skatStat: Double) {
     val s = 0.0
     val accuracy = 1e-6
     val iterations = 10000
-    val x = qfWrapper(evals, noncentrality, dof, terms, s, skatStat, iterations, accuracy, trace, fault)
+    val (x, daviesTiming) = time {qfWrapper(evals, noncentrality, dof, terms, s, skatStat, iterations, accuracy, trace, fault)}
 
-    SkatStat(skatStat, 1 - x, fault.getValue)
+    val timings = Array.fill[Long](5)(0)
+    timings(0) = eigTiming
+    timings(1) = daviesTiming
+    (SkatStat(skatStat, 1 - x, fault.getValue),timings)
   }
 
   /** computeLinearSkatStats
@@ -99,10 +105,12 @@ class SkatModel(skatStat: Double) {
     * Returns:
     *   SkatStat (see computePVal)
     */
-  def computeLinearSkatStats(GwGrammian: DenseMatrix[Double], QtGwGrammian: DenseMatrix[Double]): SkatStat = {
+  def computeLinearSkatStats(GwGrammian: DenseMatrix[Double], QtGwGrammian: DenseMatrix[Double]): (SkatStat, Array[Long]) = {
 
-    val variantGrammian = 0.5 * (GwGrammian - QtGwGrammian)
-    computePVal(variantGrammian)
+    val (variantGrammian, grammianTiming) = time {0.5 * (GwGrammian - QtGwGrammian)}
+    val (skatStat, timings) = computePVal(variantGrammian)
+    timings(2) = grammianTiming
+    (skatStat, timings)
   }
 
   /** LogisticSKATModel
@@ -121,11 +129,17 @@ class SkatModel(skatStat: Double) {
     *   SkatStat (see computePVal)
     */
   def computeLogisticSkatStat(X: DenseMatrix[Double], mu: DenseVector[Double],
-    Gw: DenseMatrix[Double]): SkatStat = {
+    Gw: DenseMatrix[Double]): (SkatStat, Array[Long]) = {
+
+    val (grammian, grammianTiming) = time {
       val V = diag(mu.map((x) => x * (1 - x)))
       val weightedX = V * X
       val P = V - weightedX * ((X.t * weightedX) \ weightedX.t)
-      computePVal(Gw.t * P * Gw)
+      Gw.t * P * Gw
+    }
+    val (skatStat, timings) = computePVal(grammian)
+    timings(2) = grammianTiming
+    (skatStat,timings)
 
 /**
     val W = diag(mu.map((x) => math.sqrt(x * (1 - x))))
