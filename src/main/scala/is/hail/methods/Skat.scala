@@ -39,8 +39,6 @@ object Skat {
     useLargeN: Boolean = false,
     useLogistic: Boolean = false): KeyTable = {
 
-
-
     def SkatRDDtoKeyTable[T <: Vector[Double]](keyedRdd: RDD[(Any, Iterable[(T, Double)])], keyType: Type,
       y: DenseVector[Double], cov: DenseMatrix[Double], keyName: String,
       resultOp: (Array[SkatTuple[T]], Double) => SkatStat): KeyTable = {
@@ -411,6 +409,7 @@ object Skat {
     }
 
     val (keysType, keysQuerier) = filteredVds.queryVA(variantKeys)
+
     val (weightType, weightQuerier) = weightExpr match {
       case None => filteredVds.queryVA("va.weight")
       case Some(expr) => filteredVds.queryVA(expr)

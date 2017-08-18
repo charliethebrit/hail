@@ -40,7 +40,6 @@ class SkatSuite extends SparkSuite {
     var pvalAve = 0.0
     var pvalRAve = 0.0
 
-
     var vds = hc.readVDS(fileLocation).annotateVariantsExpr("va.weight = global.weight[v]**2")
 
     //normalize data
@@ -87,29 +86,19 @@ class SkatSuite extends SparkSuite {
       pvalRAve = 0
 
     }
-/**
-    val pvalMatrix = new DenseMatrix(noiseTests,1,pvals)
-    val pvalRMatrix = new DenseMatrix(noiseTests,1,pvalsR)
-    val sendToPython = DenseMatrix.horzcat(pvalMatrix,pvalRMatrix)
-
-    hadoopConf.writeTextFile(saveFileLocation) {
-      _.write(largeMatrixToString(sendToPython,","))
-    }
-*/
-    println("blah")
   }
 
-
-  def permutationTest() = {
+ def permutationTest() = {
     val permutationTests = 100
     val pvalFileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/pvalResults/constantPvals.txt"
     val fileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/constantDemo.vds"
     val pythonFileLocation = "/Users/charlesc/Documents/Software/SkatExperiments/comparePvals.py"
+
     val pvals = Array.fill[Double](permutationTests + 1)(0.0)
     val pvalsR = Array.fill[Double](permutationTests + 1)(0.0)
     val useDosages = false
     val useLargeN = false
-    val useLogistic = true
+    val useLogistic = false
 
     var i = 0
 
@@ -124,10 +113,10 @@ class SkatSuite extends SparkSuite {
 
     var row = Skat(vds,"gene", "\'bestgeneever\'", singleKey = true, Some("va.weight"), "sa.pheno",
                     Array("sa.cov1", "sa.cov2"), useDosages, useLargeN, useLogistic).rdd.collect()
-    pvals(0) = row(0)(2).asInstanceOf[Double]
+    pvals(0) = row(0)(1).asInstanceOf[Double]
     var resultsArray = testInR(vds, "gene", "\'bestgeneever\'", singleKey = true,
       Some("va.weight"), "sa.pheno", Array("sa.cov1", "sa.cov2"), useDosages, useLogistic)
-    pvalsR(0) = resultsArray(0)(2).asInstanceOf[Double]
+    pvalsR(0) = resultsArray(0)(1).asInstanceOf[Double]
 
     println(row(0)(2).asInstanceOf[Double],resultsArray(0)(2).asInstanceOf[Double])
     println((pvals(0), pvalsR(0)))
@@ -136,11 +125,11 @@ class SkatSuite extends SparkSuite {
       vds = vds.annotateSamples(vds.sampleIds.zip(shuffle(yIS)).toMap, TFloat64, "sa.pheno")
       row = Skat(vds,"gene", "\'bestgeneever\'", singleKey = true, Some("va.weight"), "sa.pheno",
                  Array("sa.cov1", "sa.cov2"), false, true).rdd.collect()
-      pvals(i+1) = row(0)(2).asInstanceOf[Double]
+      pvals(i+1) = row(0)(1).asInstanceOf[Double]
 
       resultsArray = testInR(vds, "gene", "\'bestgeneever\'", singleKey = true,
         Some("va.weight"), "sa.pheno", Array("sa.cov1", "sa.cov2"), false, true)
-      pvalsR(i+1) = resultsArray(0)(2).asInstanceOf[Double]
+      pvalsR(i+1) = resultsArray(0)(1).asInstanceOf[Double]
 
       i += 1
 
